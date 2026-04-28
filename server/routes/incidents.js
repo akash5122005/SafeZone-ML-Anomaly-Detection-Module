@@ -1,42 +1,51 @@
 const express = require("express");
 const router = express.Router();
-const db = require("../db");
+const { db } = require("../firebase");
 const { checkAndAlert } = require("../services/mlService");
 const auth = require("../middleware/authMiddleware");
 
 // POST /api/incidents — submit a new incident
 router.post("/", async (req, res) => {
   try {
-    const { crime_type, description, severity, latitude, longitude, is_anonymous } = req.body;
-    const io = req.app.get("io");
+    const { crime_type, description, severity, latitude, longitude, is_anonymous, photo_url } = req.body;
 
-    // Optional user mapping based on token if they are logged in but didn't choose anon
     let reported_by = null;
     if (!is_anonymous && req.headers.authorization) {
-        // Just decode token here manually if needed, or pass auth middleware optionally
+        // Optional logic to link to user id if needed
     }
 
-    const result = await db.query(
-      `INSERT INTO incidents (crime_type, description, severity, latitude, longitude, location, is_anonymous, reported_by)
-       VALUES ($1, $2, $3, $4, $5, ST_SetSRID(ST_MakePoint($5, $4), 4326), $6, $7)
-       RETURNING *`,
-      [crime_type, description, severity, latitude, longitude, is_anonymous, reported_by]
-    );
+    const now = new Date();
+    const incidentData = {
+      crime_type,
+      description,
+      severity: parseInt(severity),
+      latitude: parseFloat(latitude),
+      longitude: parseFloat(longitude),
+      reported_at: now.toISOString(),
+      hour_of_day: now.getHours(),
+      day_of_week: now.getDay(),
+      is_anonymous,
+      photo_url: photo_url || null,
+      reported_by
+    };
 
-    const incident = result.rows[0];
+    const docRef = await db.collection("incidents").add(incidentData);
+    const incident = { id: docRef.id, ...incidentData };
 
     // Call ML service to score anomaly
     let mlResult;
     try {
-        mlResult = await checkAndAlert(io, incident);
+        mlResult = await checkAndAlert(incident);
         
         // Save anomaly score to DB
         if (mlResult) {
-          await db.query(
-            `INSERT INTO anomaly_scores (incident_id, anomaly_score, is_anomaly, severity_label)
-             VALUES ($1, $2, $3, $4)`,
-            [incident.id, mlResult.anomaly_score, mlResult.is_anomaly, mlResult.severity]
-          );
+          await db.collection("anomaly_scores").add({
+            incident_id: incident.id,
+            anomaly_score: mlResult.anomaly_score,
+            is_anomaly: mlResult.is_anomaly,
+            severity_label: mlResult.severity,
+            scored_at: new Date().toISOString()
+          });
         }
     } catch (e) {
         console.error("ML service failed", e.message);
@@ -52,13 +61,34 @@ router.post("/", async (req, res) => {
 // GET /api/incidents — get all incidents (authority only)
 router.get("/", auth(["authority", "admin"]), async (req, res) => {
   try {
-    const result = await db.query(
-      `SELECT i.*, a.anomaly_score, a.is_anomaly, a.cluster_id, a.is_hotspot
-       FROM incidents i
-       LEFT JOIN anomaly_scores a ON i.id = a.incident_id
-       ORDER BY i.reported_at DESC LIMIT 500`
-    );
-    res.json(result.rows);
+    const snapshot = await db.collection("incidents").orderBy("reported_at", "desc").limit(500).get();
+    const incidents = [];
+    
+    // In NoSQL, doing a join with anomaly_scores is manual. 
+    // For performance, we can fetch incidents and their anomalies, but for simplicity we return incidents directly
+    // and rely on the alerts collection or ML service output stored directly if needed.
+    // Let's fetch anomalies for these incidents to match previous logic
+    
+    const anomalySnap = await db.collection("anomaly_scores").get();
+    const anomaliesMap = {};
+    anomalySnap.forEach(doc => {
+      anomaliesMap[doc.data().incident_id] = doc.data();
+    });
+
+    snapshot.forEach(doc => {
+      const data = doc.data();
+      const anomalyData = anomaliesMap[doc.id] || {};
+      incidents.push({
+        id: doc.id,
+        ...data,
+        anomaly_score: anomalyData.anomaly_score,
+        is_anomaly: anomalyData.is_anomaly,
+        cluster_id: anomalyData.cluster_id,
+        is_hotspot: anomalyData.is_hotspot
+      });
+    });
+
+    res.json(incidents);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to fetch incidents" });
@@ -68,11 +98,24 @@ router.get("/", auth(["authority", "admin"]), async (req, res) => {
 // GET /api/incidents/heatmap — lat/lng for Mapbox heatmap
 router.get("/heatmap", async (req, res) => {
   try {
-    const result = await db.query(
-      `SELECT latitude, longitude, severity FROM incidents
-       WHERE reported_at > NOW() - INTERVAL '30 days'`
-    );
-    res.json(result.rows);
+    // 30 days logic can be done with inequality filter, but let's just get all for now to be safe with indexes
+    const snapshot = await db.collection("incidents").get();
+    const heatData = [];
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+    snapshot.forEach(doc => {
+      const data = doc.data();
+      if (new Date(data.reported_at) > thirtyDaysAgo) {
+        heatData.push({
+          latitude: data.latitude,
+          longitude: data.longitude,
+          severity: data.severity
+        });
+      }
+    });
+
+    res.json(heatData);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to fetch heatmap data" });

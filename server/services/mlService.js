@@ -1,4 +1,5 @@
 const axios = require("axios");
+const { db } = require("../firebase");
 const ML_URL = process.env.ML_SERVICE_URL || "http://localhost:8001";
 
 async function scoreIncident(incident) {
@@ -17,13 +18,17 @@ async function scoreIncident(incident) {
   }
 }
 
-async function checkAndAlert(io, incident) {
+async function checkAndAlert(incident) {
   const result = await scoreIncident(incident);
   if (result && result.is_anomaly) {
-    io.emit("anomaly_alert", {
-      incident,
+    // Write directly to alerts collection, client will pick it up via onSnapshot
+    await db.collection("alerts").add({
+      incident_id: incident.id,
+      incident: incident,
       score: result.anomaly_score,
       severity: result.severity,
+      triggered_at: new Date().toISOString(),
+      seen: false
     });
   }
   return result;

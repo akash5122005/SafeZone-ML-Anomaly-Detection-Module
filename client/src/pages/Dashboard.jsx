@@ -1,9 +1,10 @@
 import { useState, useEffect } from "react";
 import { Navigate } from "react-router-dom";
-import socket from "../services/socket";
-import api from "../services/api";
+import { collection, onSnapshot, query, orderBy, limit } from "firebase/firestore";
+import { db } from "../services/firebase";
 import HeatMap from "../components/HeatMap";
 import { AlertTriangle, MapPin, Clock } from 'lucide-react';
+import api from "../services/api"; // For initial load if needed
 
 export default function Dashboard() {
   const [incidents, setIncidents] = useState([]);
@@ -13,17 +14,23 @@ export default function Dashboard() {
   useEffect(() => {
     if (!user || user.role === 'citizen') return;
 
-    // Fetch initial data
-    api.get("/incidents").then(({ data }) => setIncidents(data)).catch(console.error);
+    // Real-time listener for incidents
+    const qIncidents = query(collection(db, "incidents"), orderBy("reported_at", "desc"), limit(100));
+    const unsubscribeIncidents = onSnapshot(qIncidents, (snapshot) => {
+      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setIncidents(data);
+    });
 
-    // Socket listeners for real-time alerts
-    socket.on("anomaly_alert", (data) => {
-      setAlerts(prev => [data, ...prev]);
-      setIncidents(prev => [data.incident, ...prev]);
+    // Real-time listener for alerts
+    const qAlerts = query(collection(db, "alerts"), orderBy("triggered_at", "desc"), limit(50));
+    const unsubscribeAlerts = onSnapshot(qAlerts, (snapshot) => {
+      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setAlerts(data);
     });
 
     return () => {
-      socket.off("anomaly_alert");
+      unsubscribeIncidents();
+      unsubscribeAlerts();
     };
   }, [user]);
 
@@ -66,11 +73,13 @@ export default function Dashboard() {
               <p className="text-slate-500 text-center mt-10">No incidents to display.</p>
             ) : (
               incidents.slice(0, 10).map((inc) => (
-                <div key={inc.id} className={`p-4 rounded-xl border ${inc.is_anomaly ? 'bg-red-500/10 border-red-500/30' : 'bg-slate-900 border-slate-700'}`}>
+                <div key={inc.id} className="p-4 rounded-xl border bg-slate-900 border-slate-700">
                   <div className="flex justify-between items-start mb-2">
                     <span className="font-bold text-white">{inc.crime_type}</span>
-                    {inc.is_anomaly && <span className="text-xs bg-red-500/20 text-red-400 px-2 py-1 rounded font-bold">ANOMALY</span>}
                   </div>
+                  {inc.photo_url && (
+                    <img src={inc.photo_url} alt="incident" className="w-full h-32 object-cover rounded-lg mb-2 border border-slate-700" />
+                  )}
                   <p className="text-sm text-slate-400 mb-3 line-clamp-2">{inc.description}</p>
                   <div className="flex gap-4 text-xs text-slate-500">
                     <span className="flex items-center gap-1"><MapPin size={12}/> {inc.latitude.toFixed(4)}, {inc.longitude.toFixed(4)}</span>

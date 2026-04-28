@@ -8,15 +8,40 @@ export default function ReportIncident() {
     crime_type: "", description: "", severity: 3,
     latitude: "13.0827", longitude: "80.2707", is_anonymous: true,
   });
+  const [imageFile, setImageFile] = useState(null);
   const [submitted, setSubmitted] = useState(false);
   const [loading, setLoading] = useState(false);
+
+  const handleImageUpload = async () => {
+    if (!imageFile) return null;
+    const formData = new FormData();
+    formData.append("file", imageFile);
+    formData.append("upload_preset", import.meta.env.VITE_CLOUDINARY_UPLOAD_PRESET || "safezone_preset");
+
+    const CLOUD_NAME = import.meta.env.VITE_CLOUDINARY_CLOUD_NAME || "demo";
+    
+    try {
+      const res = await fetch(`https://api.cloudinary.com/v1_1/${CLOUD_NAME}/image/upload`, {
+        method: "POST",
+        body: formData
+      });
+      const data = await res.json();
+      return data.secure_url;
+    } catch (err) {
+      console.error("Cloudinary Upload Error:", err);
+      return null;
+    }
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setLoading(true);
     try {
+      let photo_url = await handleImageUpload();
+
       await api.post("/incidents", {
         ...form,
+        photo_url,
         latitude: parseFloat(form.latitude),
         longitude: parseFloat(form.longitude)
       });
@@ -70,10 +95,16 @@ export default function ReportIncident() {
             type="range" min="1" max="5" 
             className="w-full accent-cyan-500"
             value={form.severity} onChange={e => setForm({...form, severity: +e.target.value})} />
-          <div className="flex justify-between text-xs text-slate-500 mt-2">
-            <span>Low</span>
-            <span>Critical</span>
-          </div>
+        </div>
+
+        <div>
+            <label className="block text-sm font-medium text-slate-400 mb-2">Upload Photo (Optional)</label>
+            <input 
+              type="file" 
+              accept="image/*"
+              onChange={(e) => setImageFile(e.target.files[0])}
+              className="w-full text-sm text-slate-400 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-cyan-500 file:text-slate-900 hover:file:bg-cyan-400 transition"
+            />
         </div>
 
         <div className="grid grid-cols-2 gap-4">
